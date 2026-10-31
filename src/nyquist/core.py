@@ -5,7 +5,20 @@ from torch.nn import functional as F
 from .vision import classification_metrics
 
 
-METHODS = ["nyquist", "erm", "multiscale", "full_consistency", "fixed_lowpass", "alias_only"]
+METHODS = ["nyquist", "erm", "multiscale", "full_consistency", "fixed_lowpass", "alias_only", "blurpool"]
+
+
+class BlurPool(nn.Module):
+    """Fixed binomial low-pass before subsampling; no learned parameters."""
+
+    def __init__(self, channels):
+        super().__init__()
+        kernel = torch.tensor([1., 2., 1.])
+        kernel = kernel[:, None] * kernel[None, :] / 16
+        self.register_buffer("kernel", kernel[None, None].repeat(channels, 1, 1, 1))
+
+    def forward(self, x):
+        return F.conv2d(F.pad(x, (1, 1, 1, 1), mode="reflect"), self.kernel, stride=2, groups=x.shape[1])
 
 
 class Model(nn.Module):
@@ -23,6 +36,9 @@ class Model(nn.Module):
             nn.GELU(),
         )
         self.head = nn.Linear(128, cfg["classes"])
+        if method == "blurpool":
+            self.encoder[3].stride = (1, 1)
+            self.encoder.insert(6, BlurPool(128))
 
     def forward(self, x):
         features = self.encoder(x.float())
@@ -42,9 +58,10 @@ def spectral_pair(model, x, scale, method):
     h, w = high_feature.shape[-2:]
     fy, fx = torch.fft.fftfreq(h, device=x.device) * h, torch.fft.fftfreq(w, device=x.device) * w
     cutoff_y, cutoff_x = low_shape[0] / 2, low_shape[1] / 2
+    common = ((fy.abs()[:, None] < cutoff_y) & (fx.abs()[None] < cutoff_x)).to(high_fft.dtype)
+    mask = common
     if method == "fixed_lowpass":
-        cutoff_y, cutoff_x = h / 4, w / 4
-    mask = ((fy.abs()[:, None] < cutoff_y) & (fx.abs()[None] < cutoff_x)).to(high_fft.dtype)
+        mask = ((fy.abs()[:, None] < h / 4) & (fx.abs()[None] < w / 4)).to(high_fft.dtype)
     difference = high_fft - low_fft
     full = difference.abs().square().mean((1, 2, 3))
     projected = (difference * mask).abs().square().mean((1, 2, 3))
@@ -57,10 +74,13 @@ def spectral_pair(model, x, scale, method):
     unsupported = (iy.abs()[:, None] >= scale / 2) | (ix.abs()[None] >= scale / 2)
     alias = (image_fft * unsupported).sum((1, 2, 3)) / image_fft.sum((1, 2, 3)).clamp_min(1e-8)
     weight = (1 - alias.detach()).clamp(0, 1)
-    consistency = full if method in ("full_consistency", "alias_only") else projected
+    consistency = full if method in ("full_consistency", "alias_only", "blurpool") else projected
     if method in ("nyquist", "alias_only"):
         consistency = weight * consistency
-    supported = projected * weight if method in ("nyquist", "alias_only") else projected
+    applied_mask = torch.ones_like(common) if method in ("full_consistency", "alias_only", "blurpool") else mask
+    supported = (difference * applied_mask * common).abs().square().mean((1, 2, 3))
+    if method in ("nyquist", "alias_only"):
+        supported = supported * weight
     return (
         high_logits,
         low_logits,
@@ -72,6 +92,13 @@ def spectral_pair(model, x, scale, method):
 
 
 def loss(model, batch, cfg):
+    if model.method == "erm":
+        return F.cross_entropy(model(batch["x"])[0], batch["y"].long())
+    if model.method == "multiscale":
+        low = F.interpolate(batch["x"].float(), (cfg["low_resolution"], cfg["low_resolution"]),
+                            mode="bilinear", align_corners=False, antialias=True)
+        return 0.5 * (F.cross_entropy(model(batch["x"])[0], batch["y"].long()) +
+                      F.cross_entropy(model(low)[0], batch["y"].long()))
     high, low, consistency, _, _, _ = spectral_pair(
         model, batch["x"].float(), cfg["low_resolution"], model.method
     )

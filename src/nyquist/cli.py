@@ -131,6 +131,7 @@ def train(config, data, output, method):
             optimizer.step()
             total += float(loss.detach()) * len(batch["x"])
             samples += len(batch["x"])
+        training_seconds = time.perf_counter() - start
         model.eval()
         valid = 0.0
         count = 0
@@ -147,6 +148,8 @@ def train(config, data, output, method):
             "train_loss": total / samples,
             "validation_loss": valid,
             "epoch_seconds": time.perf_counter() - start,
+            "training_seconds": training_seconds,
+            "training_images_per_second": samples / training_seconds,
         }
         with (output / "history.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(row) + "\n")
@@ -307,6 +310,26 @@ def plot(inputs, output):
         plt.close(fig)
 
 
+def infer(checkpoint, data, output):
+    """Predict class probabilities from x-only NPZ data on CPU."""
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    cfg = payload["config"]
+    model = core.Model(cfg, payload["method"]).eval()
+    model.load_state_dict(payload["state"])
+    with np.load(data, allow_pickle=False) as source:
+        x = np.asarray(source["x"], dtype=np.float32)
+    if x.ndim != 4 or x.shape[1] != 3:
+        raise ValueError("x must be an NCHW RGB image array")
+    logits = []
+    with torch.no_grad():
+        for start in range(0, len(x), cfg["batch_size"]):
+            logits.append(model(torch.from_numpy(x[start:start + cfg["batch_size"]]))[0])
+    logits = torch.cat(logits)
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(output, logits=logits.numpy(), probability=logits.softmax(-1).numpy())
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -332,6 +355,10 @@ def main():
     item = sub.add_parser("plot")
     item.add_argument("--inputs", nargs="+", required=True)
     item.add_argument("--output", required=True)
+    item = sub.add_parser("infer")
+    item.add_argument("--checkpoint", required=True)
+    item.add_argument("--data", required=True)
+    item.add_argument("--output", required=True)
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.source, args.output, args.seed)
@@ -341,6 +368,8 @@ def main():
             train(cfg, args.data, Path(args.output) / method, method)
     elif args.command == "evaluate":
         evaluate(args.checkpoint, args.data, args.output)
+    elif args.command == "infer":
+        infer(args.checkpoint, args.data, args.output)
     else:
         plot(args.inputs, args.output)
 
