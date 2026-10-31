@@ -69,6 +69,19 @@ python -m nyquist.diagnostics --checkpoint runs/main/nyquist/model.pt --referenc
 `verify_extensions` additionally exercises all seven methods on standard ResNet-18, checking gradients and updates in the encoder and classifier, tensor-only save/load agreement, and an actual train/evaluate/infer/diagnostic/plot chain. The CIFAR adapter is tested with generated files in the original distributed pickle schema; only the fixture's official-download MD5 checks are mocked, because generated fixtures necessarily differ from the release checksums. Image IDs remain disjoint across train/validation/test. Empty/DC-only/shared/per-example oracle masks and training isolation are checked. The annotations never alter a deployable training-method loss. The original `verify` entry continues to test all seven methods on the compact CPU backbone.
 
 
+## Small real-CIFAR check
+
+```bash
+python -m pip install -e ".[remote]"
+python -m nyquist.cifar_subset --train-count 40 --validation-count 8 --test-count 10 --output data/cifar-small.npz
+python -m nyquist prepare --source data/cifar-small.npz --output data/cifar-small --seed 17
+python -m nyquist suite --config configs/data_smoke.json --data data/cifar-small --output runs/real-cifar-check
+```
+
+This optional path fetches real images and fine/coarse labels from the public [uoft-cs/cifar100 mirror](https://huggingface.co/datasets/uoft-cs/cifar100) through the dataset viewer. It retains original source row IDs and official train/test membership, reserving 8 of the 40 source training images for validation with seed 17. It caps each source split at 100 rows for functional checks. Viewer-encoded image assets are used as served; the tool does not claim bitwise equivalence to the Toronto archive or bypass its checksum checks. The existing `cifar` entry remains the full original-archive adapter. The one-epoch ResNet18 configuration is not a performance recipe, and this path supplies no semantic task-frequency annotations.
+
+The real-image check actually completed all seven standard methods on 32 train, 8 validation and 10 official-test images, with one epoch per method, finite training/validation loss and checkpoint-based held-out evaluation. Source IDs were checked disjoint across roles. The local evidence is `runs/real-cifar-20261101/verification.json`. These first-row subsets are for executable data-path verification, not a representative accuracy estimate or the manuscript's full CIFAR experiment.
+
 ## Known-spectrum oracle reference
 
 ```bash
