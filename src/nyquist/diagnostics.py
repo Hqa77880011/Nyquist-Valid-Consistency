@@ -44,6 +44,7 @@ def main():
     parser.add_argument("--data", required=True)
     parser.add_argument("--scales", type=int, nargs="+", default=[16, 24, 32])
     parser.add_argument("--output", required=True)
+    parser.add_argument("--oracle-support", help="Evaluation-only binary .npy support in unshifted FFT order")
     args = parser.parse_args()
     if len(set(args.scales)) != len(args.scales) or any(scale < 4 for scale in args.scales):
         parser.error("scales must be unique and >=4")
@@ -52,11 +53,16 @@ def main():
     with np.load(args.data, allow_pickle=False) as source:
         arrays = dict(source)
     x, y = torch.tensor(arrays["x"]), torch.tensor(arrays["y"])
+    oracle_support = np.load(args.oracle_support, allow_pickle=False) if args.oracle_support else arrays.get("oracle_support")
+    if oracle_support is not None and oracle_support.ndim == 3 and len(oracle_support) != len(x):
+        parser.error("Per-example oracle support must match the evaluation sample count")
     records = []
     parameters = tuple(model.parameters())
     for scale in sorted(args.scales):
         correct = reference_correct = total = 0
         ratios = []
+        oracle_ratios = []
+        oracle_losses = []
         paired_scale = max(4, round(scale * cfg["low_resolution"] / x.shape[-1]))
         for offset in range(0, len(x), cfg["batch_size"]):
             batch = x[offset : offset + cfg["batch_size"]]
@@ -76,6 +82,13 @@ def main():
             if model.method in ("erm", "multiscale"):
                 continue
             ratios.append((unsupported_gradient_ratio(applied, supported, parameters), len(labels)))
+            if oracle_support is not None:
+                annotation = oracle_support if oracle_support.ndim == 2 else oracle_support[offset:offset + len(batch)]
+                _, _, oracle_loss, _, _, common_loss = spectral_pair(
+                    model, resized, paired_scale, "oracle_support", annotation
+                )
+                oracle_losses.append((float(oracle_loss.detach()), len(batch)))
+                oracle_ratios.append((unsupported_gradient_ratio(oracle_loss, common_loss, parameters), len(batch)))
         records.append(
             {
                 "resolution": scale,
@@ -83,6 +96,8 @@ def main():
                 "accuracy": correct / total,
                 "reference_accuracy": reference_correct / total,
                 "ucgr": float(np.average([value for value, _ in ratios], weights=[count for _, count in ratios])) if ratios else None,
+                "oracle_support_ucgr": float(np.average([v for v, _ in oracle_ratios], weights=[n for _, n in oracle_ratios])) if oracle_ratios else None,
+                "oracle_support_consistency": float(np.average([v for v, _ in oracle_losses], weights=[n for _, n in oracle_losses])) if oracle_losses else None,
             }
         )
     axis = np.asarray([r["resolution"] for r in records], float)

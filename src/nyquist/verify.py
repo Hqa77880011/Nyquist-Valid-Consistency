@@ -26,7 +26,7 @@ def main():
              split=np.repeat([0, 1, 2], [18, 6, 6]))
     cli.prepare(output / "raw.npz", output / "data", 17)
     cfg = json.loads((Path(__file__).parents[2] / "configs/default.json").read_text())
-    cfg.update(classes=3, epochs=1, batch_size=6)
+    cfg.update(classes=3, epochs=1, batch_size=6, backbone="cnn")
     batch = next(iter(torch.utils.data.DataLoader(cli.Arrays(output / "data/train.npz"), batch_size=6)))
     summary = {}
     for method in core.METHODS:

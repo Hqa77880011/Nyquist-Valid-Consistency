@@ -26,7 +26,7 @@ python -m nyquist.diagnostics --checkpoint runs/comparison/nyquist/model.pt --re
 python -m nyquist plot --inputs runs/main/nyquist results/main --output figures
 ```
 
-Training uses AdamW with cosine schedule and best validation-loss checkpoint, seed17, lr0.001, batch32, 100 epochs, patience15, low_resolution16 and consistency_weight0.1. These are explicit implementation choices. The compact shared CNN has three convolutions, GroupNorm, GELU and a pooled classifier. The task objective is the mean CE of both branches for multi-scale methods, plus the applicable consistency term. ERM computes only the high-resolution branch. Inference uses the unchanged single encoder and classifier; `infer` requires only x and runs on CPU.
+Training uses AdamW with cosine schedule and best validation-loss checkpoint, seed17, lr0.001, batch32, 100 epochs, patience15, low_resolution16 and consistency_weight0.1. These are explicit implementation choices. The default backbone is a torchvision ResNet-18 with a CIFAR 3x3 stride-one stem, no max pool, spatial features through layer3, and a 256-dimensional pooled classifier. It is trained from scratch without downloading weights. Set `backbone=cnn` for the original compact three-convolution smoke backbone; old checkpoints without this field retain that behavior. ResNet-18 is an explicit implementation choice because the manuscript does not identify its original backbone. BlurPool replaces every stride-two convolution, including residual downsample paths, with stride-one convolution followed by the fixed binomial filter. The task objective is the mean CE of both branches for multi-scale methods, plus the applicable consistency term. ERM computes only the high-resolution branch. Inference uses the unchanged single encoder and classifier; `infer` requires only x and runs on CPU.
 
 ## Method, metric and entry mapping
 
@@ -46,7 +46,7 @@ Views use antialiased bilinear image downsampling. Lower-resolution features are
 
 UCGR is `||grad(applied)-grad(applied restricted to common support)|| / ||grad(applied)||`, with zero denominator mapped to zero. In particular a binary projected objective has zero unsupported gradient up to numerical error; this algebraic result is not evidence for the nonzero paper measurement. Fixed-mask diagnostics restrict the actual applied mask by common support rather than incorrectly subtracting the same gradient from itself. Per-batch parameter-gradient norm ratios are weighted by sample count; classifier-head gradients are absent from this consistency diagnostic. At each stress resolution, the paired low resolution preserves the configured training view ratio. The reported NTA integrates positive accuracy deficits relative to the supplied multi-scale reference uniformly over the supplied resolution axis, divides by axis range, and also reports 100x the fraction as percentage points. This convention is explicit because the paper does not provide the original aggregation code.
 
-All seven methods share the classifier parameterization and optimization defaults. An evaluation-only oracle task-frequency mask is not included: no oracle task-frequency annotations were provided. The present code does not claim to reproduce the paper's reported numerical table.
+All seven methods share the classifier parameterization and optimization defaults. The evaluation-only oracle accepts binary task-frequency annotations through `--oracle-support support.npy` in diagnostics, or an `oracle_support` array in the evaluation NPZ. Masks are unshifted FFT grids of shape `(H,W)` or `(N,H,W)`; integer cycles are mapped onto the feature grid. Diagnostics report oracle-masked consistency and its common-support UCGR. Training never consumes the annotations, and oracle is deliberately absent from train/suite method choices. For natural CIFAR images the exact task-frequency support is not given by a class label; supply independent ground-truth annotations when available. The functional fixture uses a declared DC-only task support and does not invent a CIFAR oracle accuracy. The present code does not claim to reproduce the paper's reported numerical table.
 
 ## Outputs and actual verification
 
@@ -57,3 +57,13 @@ python -m nyquist.verify --output runs/check
 ```
 
 The functional check uses generated 32x32 images with explicit disjoint splits, all seven methods, one epoch, finite loss, nonzero gradients, parameter updates, save/load agreement (atol1e-7, rtol1e-6), x-only inference agreement, actual evaluation/diagnostics and figures. It checks hand examples UCGR=0.8, NTA=0.1, ECE=0.25 and NLL=-log(0.56)/2, including a nonshared fixed-mask regression. Tested with Python3.13.5, torch2.7.1+cu118 and numpy2.1.3, CPU1 thread, seed17. The tested Anaconda environment needs process-local `OMP_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `MKL_THREADING_LAYER=SEQUENTIAL` to avoid duplicate OpenMP runtime loading. No shared packages or global settings are changed.
+
+
+## Standard-backbone and oracle verification
+
+```bash
+python -m nyquist.verify_extensions --output runs/extensions
+python -m nyquist.diagnostics --checkpoint runs/main/nyquist/model.pt --reference runs/comparison/multiscale/model.pt --data data/prepared/test.npz --scales 16 24 32 --oracle-support data/task_support.npy --output results/oracle_diagnostics.json
+```
+
+`verify_extensions` additionally exercises all seven methods on standard ResNet-18, checking gradients and updates in the encoder and classifier, tensor-only save/load agreement, and an actual train/evaluate/infer/diagnostic/plot chain. The CIFAR adapter is tested with generated files in the original distributed pickle schema; only the fixture's official-download MD5 checks are mocked, because generated fixtures necessarily differ from the release checksums. Image IDs remain disjoint across train/validation/test. Empty/DC-only/shared/per-example oracle masks and training isolation are checked. The annotations never alter a training loss. The original `verify` entry continues to test all seven methods on the compact CPU backbone.

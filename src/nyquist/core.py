@@ -25,6 +25,7 @@ class Model(nn.Module):
     def __init__(self, cfg, method):
         super().__init__()
         self.method = method
+        backbone = cfg.get("backbone", "cnn")
         self.encoder = nn.Sequential(
             nn.Conv2d(3, 64, 3, padding=1),
             nn.GroupNorm(8, 64),
@@ -39,13 +40,31 @@ class Model(nn.Module):
         if method == "blurpool":
             self.encoder[3].stride = (1, 1)
             self.encoder.insert(6, BlurPool(128))
+        if backbone == "resnet18":
+            from torchvision.models import resnet18
+
+            network = resnet18(weights=None)
+            network.conv1 = nn.Conv2d(3, 64, 3, stride=1, padding=1, bias=False)
+            self.encoder = nn.Sequential(
+                network.conv1, network.bn1, network.relu,
+                network.layer1, network.layer2, network.layer3,
+            )
+            self.head = nn.Linear(256, cfg["classes"])
+            if method == "blurpool":
+                for parent in list(self.encoder.modules()):
+                    for name, layer in list(parent.named_children()):
+                        if isinstance(layer, nn.Conv2d) and layer.stride == (2, 2):
+                            layer.stride = (1, 1)
+                            parent._modules[name] = nn.Sequential(layer, BlurPool(layer.out_channels))
+        elif backbone != "cnn":
+            raise ValueError("backbone must be cnn or resnet18")
 
     def forward(self, x):
         features = self.encoder(x.float())
         return self.head(features.mean((-2, -1))), features
 
 
-def spectral_pair(model, x, scale, method):
+def spectral_pair(model, x, scale, method, task_support=None):
     low = F.interpolate(x, (scale, scale), mode="bilinear", align_corners=False, antialias=True)
     high_logits, high_feature = model(x)
     low_logits, low_feature = model(low)
@@ -62,6 +81,18 @@ def spectral_pair(model, x, scale, method):
     mask = common
     if method == "fixed_lowpass":
         mask = ((fy.abs()[:, None] < h / 4) & (fx.abs()[None] < w / 4)).to(high_fft.dtype)
+    if method == "oracle_support":
+        if task_support is None:
+            raise ValueError("The evaluation-only oracle needs externally supplied task support")
+        support = torch.as_tensor(task_support, device=x.device)
+        if support.ndim == 2:
+            support = support[None].expand(len(x), -1, -1)
+        if support.ndim != 3 or len(support) != len(x) or not torch.all((support == 0) | (support == 1)):
+            raise ValueError("Task support must be binary (H,W) or (N,H,W), in unshifted FFT order")
+        # Frequencies are integer cycles on the common physical domain, not resize indices.
+        rows = fy.long().remainder(support.shape[-2])
+        columns = fx.long().remainder(support.shape[-1])
+        mask = support[:, rows[:, None], columns[None, :]][:, None].to(high_fft.dtype)
     difference = high_fft - low_fft
     full = difference.abs().square().mean((1, 2, 3))
     projected = (difference * mask).abs().square().mean((1, 2, 3))
@@ -75,11 +106,11 @@ def spectral_pair(model, x, scale, method):
     alias = (image_fft * unsupported).sum((1, 2, 3)) / image_fft.sum((1, 2, 3)).clamp_min(1e-8)
     weight = (1 - alias.detach()).clamp(0, 1)
     consistency = full if method in ("full_consistency", "alias_only", "blurpool") else projected
-    if method in ("nyquist", "alias_only"):
+    if method in ("nyquist", "alias_only", "oracle_support"):
         consistency = weight * consistency
     applied_mask = torch.ones_like(common) if method in ("full_consistency", "alias_only", "blurpool") else mask
     supported = (difference * applied_mask * common).abs().square().mean((1, 2, 3))
-    if method in ("nyquist", "alias_only"):
+    if method in ("nyquist", "alias_only", "oracle_support"):
         supported = supported * weight
     return (
         high_logits,
