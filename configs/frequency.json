@@ -1,0 +1,13 @@
+{
+  "seed": 17,
+  "device": "cpu",
+  "epochs": 100,
+  "patience": 15,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "classes": 3,
+  "backbone": "resnet18",
+  "low_resolution": 16,
+  "consistency_weight": 0.1
+}

@@ -131,7 +131,9 @@ def loss(model, batch, cfg):
         return 0.5 * (F.cross_entropy(model(batch["x"])[0], batch["y"].long()) +
                       F.cross_entropy(model(low)[0], batch["y"].long()))
     high, low, consistency, _, _, _ = spectral_pair(
-        model, batch["x"].float(), cfg["low_resolution"], model.method
+        model, batch["x"].float(), cfg["low_resolution"],
+        "oracle_support" if model.method == "oracle_reference" else model.method,
+        batch.get("oracle_support") if model.method == "oracle_reference" else None,
     )
     task = F.cross_entropy(high, batch["y"].long())
     if model.method != "erm":
