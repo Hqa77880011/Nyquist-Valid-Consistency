@@ -1,4 +1,4 @@
-"""Functional CPU check on generated images, without a performance claim."""
+"""CPU checks for cross-scale consistency on generated images."""
 
 import argparse
 import io
